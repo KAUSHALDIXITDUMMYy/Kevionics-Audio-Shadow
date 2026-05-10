@@ -1,0 +1,1103 @@
+"use client"
+
+import type React from "react"
+
+import { useState, useEffect, useMemo } from "react"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Badge } from "@/components/ui/badge"
+import { Alert, AlertDescription } from "@/components/ui/alert"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { Switch } from "@/components/ui/switch"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from "@/components/ui/alert-dialog"
+import { createUser, getAllUsers, updateUserStatus, updateUserChatPermission, resetUserPassword } from "@/lib/admin"
+import type { UserProfile, UserRole } from "@/lib/auth"
+import {
+  Plus,
+  Users,
+  UserCheck,
+  UserX,
+  Shield,
+  Video,
+  Eye,
+  ChevronDown,
+  ChevronUp,
+  KeyRound,
+  MessageSquare,
+  Search,
+  ListTree,
+  RefreshCw,
+  Loader2,
+} from "lucide-react"
+import { Textarea } from "@/components/ui/textarea"
+import { toast } from "@/hooks/use-toast"
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
+import { useIsMobile } from "@/hooks/use-mobile"
+import { useAuth } from "@/hooks/use-auth"
+import { isShadowAdmin, KEVIONICS_EMAIL_DOMAIN, resolveUserTenant } from "@/lib/tenant"
+import { PRODUCT_DISPLAY_NAME } from "@/lib/branding"
+
+// Utility function to convert Firestore Timestamp to Date
+const convertTimestampToDate = (timestamp: any): Date | null => {
+  if (!timestamp) return null
+  
+  // If it's already a Date object
+  if (timestamp instanceof Date) {
+    return timestamp
+  }
+  
+  // If it's a Firestore Timestamp with toDate method
+  if (timestamp && typeof timestamp.toDate === 'function') {
+    return timestamp.toDate()
+  }
+  
+  // If it's a Firestore Timestamp object with seconds and nanoseconds
+  if (timestamp && typeof timestamp.seconds === 'number') {
+    return new Date(timestamp.seconds * 1000)
+  }
+  
+  // Try to parse as string or number
+  try {
+    const date = new Date(timestamp)
+    if (!isNaN(date.getTime())) {
+      return date
+    }
+  } catch (e) {
+    console.error('Error converting timestamp:', timestamp, e)
+  }
+  
+  return null
+}
+
+// Utility function to sort users alphabetically
+const sortUsersAlphabetically = (users: (UserProfile & { id: string })[]) => {
+  return [...users].sort((a, b) => {
+    const nameA = (a.displayName || a.email).toLowerCase()
+    const nameB = (b.displayName || b.email).toLowerCase()
+    return nameA.localeCompare(nameB)
+  })
+}
+
+/** Split pasted text into trimmed non-empty name lines */
+const parseBulkNames = (text: string): string[] =>
+  text
+    .split(/[\n,;]+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0)
+
+/** Local part for email from a display name (matches scripts/create-publishers.mjs) */
+const nameToEmailLocal = (name: string) => name.toLowerCase().replace(/\s+/g, "")
+
+const normalizeDomain = (d: string) => d.trim().toLowerCase().replace(/^@/, "")
+
+export function UserManagement() {
+  const { user, userProfile, loading: authLoading } = useAuth()
+  const isKevShadow = Boolean(userProfile && isShadowAdmin(userProfile))
+  const [users, setUsers] = useState<(UserProfile & { id: string })[]>([])
+  const [loading, setLoading] = useState(true)
+  const [showCreateForm, setShowCreateForm] = useState(false)
+  const [createLoading, setCreateLoading] = useState(false)
+  const [error, setError] = useState("")
+  const [success, setSuccess] = useState("")
+  const [statsOpen, setStatsOpen] = useState(false)
+  const isMobile = useIsMobile()
+
+  // Create user form state
+  const [email, setEmail] = useState("")
+  const [password, setPassword] = useState("")
+  const [role, setRole] = useState<UserRole>("subscriber")
+  const [displayName, setDisplayName] = useState("")
+
+  /** Bulk create: one display name per line or separated by commas/semicolons */
+  const [bulkNamesText, setBulkNamesText] = useState("")
+  const [bulkEmailDomain, setBulkEmailDomain] = useState("sportsmagician.com")
+  const [bulkPassword, setBulkPassword] = useState("")
+  const [bulkRole, setBulkRole] = useState<"subscriber" | "publisher">("subscriber")
+  const [bulkLoading, setBulkLoading] = useState(false)
+  const [bulkSkippedNames, setBulkSkippedNames] = useState<{ name: string; email: string; reason: string }[]>([])
+  const [bulkCreatedCount, setBulkCreatedCount] = useState<number | null>(null)
+
+  // Search state (for All Users tab)
+  const [searchQuery, setSearchQuery] = useState("")
+
+  // Password reset state
+  const [resetPasswordUserId, setResetPasswordUserId] = useState<string | null>(null)
+  const [resetPasswordEmail, setResetPasswordEmail] = useState("")
+  const [newPassword, setNewPassword] = useState("")
+  const [confirmPassword, setConfirmPassword] = useState("")
+  const [resetPasswordLoading, setResetPasswordLoading] = useState(false)
+  const [listRefreshing, setListRefreshing] = useState(false)
+
+  useEffect(() => {
+    if (!userProfile || userProfile.role !== "admin") return
+    void loadUsers(false)
+    const intervalId = setInterval(() => void loadUsers(true), 60_000)
+    return () => clearInterval(intervalId)
+  }, [userProfile?.uid, userProfile?.tenant, userProfile?.email])
+
+  useEffect(() => {
+    if (isKevShadow) {
+      setBulkEmailDomain(KEVIONICS_EMAIL_DOMAIN)
+      setBulkRole("subscriber")
+      setRole("subscriber")
+    }
+  }, [isKevShadow])
+
+  /** @param silent When true, refresh list without full-page loading spinner (reduces Firestore reads vs. realtime snapshot on entire collection). */
+  const loadUsers = async (silent = false) => {
+    if (!userProfile || userProfile.role !== "admin") return
+    if (!silent) setLoading(true)
+    try {
+      const usersData = await getAllUsers(userProfile)
+      setUsers(usersData as (UserProfile & { id: string })[])
+    } finally {
+      if (!silent) setLoading(false)
+    }
+  }
+
+  const handleRefreshUserList = async () => {
+    setListRefreshing(true)
+    try {
+      await loadUsers(true)
+    } finally {
+      setListRefreshing(false)
+    }
+  }
+
+  const emailExists = useMemo(
+    () =>
+      Boolean(email.trim()) &&
+      users.some((u) => u.email.toLowerCase() === email.trim().toLowerCase()),
+    [users, email],
+  )
+
+  const handleCreateUser = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!userProfile || userProfile.role !== "admin") {
+      setError("You must be signed in as an administrator.")
+      return
+    }
+    if (emailExists) {
+      setError("A user with this email already exists")
+      return
+    }
+    setCreateLoading(true)
+    setError("")
+    setSuccess("")
+
+    const result = await createUser(email, password, role, displayName, {
+      tenant: resolveUserTenant(userProfile),
+      role: userProfile.role,
+    })
+
+    if (result.error) {
+      setError(result.error)
+    } else if (result.user) {
+      setSuccess(`User created successfully! ${email} can now log in with their credentials.`)
+      setEmail("")
+      setPassword("")
+      setDisplayName("")
+      setRole("subscriber")
+      setShowCreateForm(false)
+      loadUsers()
+    }
+
+    setCreateLoading(false)
+  }
+
+  const handleBulkCreateUsers = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!userProfile || userProfile.role !== "admin") {
+      setError("You must be signed in as an administrator.")
+      return
+    }
+    setBulkLoading(true)
+    setError("")
+    setSuccess("")
+    setBulkSkippedNames([])
+    setBulkCreatedCount(null)
+
+    let domain = normalizeDomain(bulkEmailDomain)
+    if (isKevShadow) {
+      domain = KEVIONICS_EMAIL_DOMAIN
+    }
+    if (!domain || !domain.includes(".")) {
+      setError("Enter a valid email domain (e.g. sportsmagician.com)")
+      setBulkLoading(false)
+      return
+    }
+    if (isKevShadow && domain !== KEVIONICS_EMAIL_DOMAIN) {
+      setError(`Kevionics shadow admins must use @${KEVIONICS_EMAIL_DOMAIN}`)
+      setBulkLoading(false)
+      return
+    }
+    if (!bulkPassword || bulkPassword.length < 6) {
+      setError("Password must be at least 6 characters for bulk create")
+      setBulkLoading(false)
+      return
+    }
+
+    const rawNames = parseBulkNames(bulkNamesText)
+    if (rawNames.length === 0) {
+      setError("Paste at least one name")
+      setBulkLoading(false)
+      return
+    }
+
+    const skipped: { name: string; email: string; reason: string }[] = []
+    const seenLocals = new Set<string>()
+    const namesToCreate: { displayName: string; email: string }[] = []
+
+    for (const name of rawNames) {
+      const local = nameToEmailLocal(name)
+      if (!local) {
+        skipped.push({ name, email: "", reason: "Invalid name (empty after normalizing)" })
+        continue
+      }
+      if (seenLocals.has(local)) {
+        skipped.push({ name, email: `${local}@${domain}`, reason: "Duplicate in list" })
+        continue
+      }
+      seenLocals.add(local)
+      const email = `${local}@${domain}`
+      const emailTaken = users.some((u) => u.email.toLowerCase() === email)
+      if (emailTaken) {
+        skipped.push({ name, email, reason: "Email already exists" })
+        continue
+      }
+      namesToCreate.push({ displayName: name, email })
+    }
+
+    let created = 0
+    for (const { displayName: dn, email } of namesToCreate) {
+      const result = await createUser(email, bulkPassword, bulkRole, dn, {
+        tenant: resolveUserTenant(userProfile),
+        role: userProfile.role,
+      })
+      if (result.error) {
+        skipped.push({
+          name: dn,
+          email,
+          reason: result.error,
+        })
+      } else {
+        created++
+      }
+      await new Promise((r) => setTimeout(r, 50))
+    }
+
+    setBulkSkippedNames(skipped)
+    setBulkCreatedCount(created)
+    if (created > 0) {
+      setSuccess(
+        `Created ${created} ${bulkRole} account(s). Same password for all. Login email for each row is &lt;name&gt;@${domain} (name lowercased, spaces removed).`,
+      )
+      toast({
+        title: "Bulk create finished",
+        description: `${created} created${skipped.length ? `, ${skipped.length} skipped or failed` : ""}.`,
+      })
+    } else if (skipped.length) {
+      setError("No new accounts were created. See the list below.")
+    }
+    if (created > 0) {
+      setBulkNamesText("")
+    }
+    setBulkLoading(false)
+  }
+
+  const handleToggleChat = async (userId: string, currentValue: boolean) => {
+    const result = await updateUserChatPermission(userId, !currentValue)
+    if (result.success) {
+      void loadUsers(true)
+      const u = users.find((x) => x.id === userId)
+      toast({
+        title: "Chat Updated",
+        description: `${u?.displayName || u?.email} can ${!currentValue ? "now" : "no longer"} chat with assigned publishers.`,
+      })
+    } else {
+      toast({
+        title: "Error",
+        description: result.error || "Failed to update chat permission",
+        variant: "destructive",
+      })
+    }
+  }
+
+  const handleToggleUserStatus = async (userId: string, currentStatus: boolean) => {
+    const result = await updateUserStatus(userId, !currentStatus)
+    if (result.success) {
+      void loadUsers(true)
+      const user = users.find(u => u.id === userId)
+      toast({
+        title: "Status Updated",
+        description: `${user?.email || "User"} has been ${!currentStatus ? "activated" : "deactivated"}.`,
+      })
+    } else {
+      const errorMessage = result.error || "Failed to update user status"
+      setError(errorMessage)
+      toast({
+        title: "Error",
+        description: errorMessage,
+        variant: "destructive",
+      })
+    }
+  }
+
+  const handleResetPassword = async () => {
+    if (!resetPasswordUserId || !user?.uid) {
+      toast({
+        title: "Error",
+        description: "Missing required information",
+        variant: "destructive",
+      })
+      return
+    }
+
+    if (!newPassword || newPassword.length < 6) {
+      toast({
+        title: "Error",
+        description: "Password must be at least 6 characters long",
+        variant: "destructive",
+      })
+      return
+    }
+
+    if (newPassword !== confirmPassword) {
+      toast({
+        title: "Error",
+        description: "Passwords do not match",
+        variant: "destructive",
+      })
+      return
+    }
+
+    setResetPasswordLoading(true)
+
+    try {
+      const result = await resetUserPassword(resetPasswordUserId, newPassword, user.uid)
+
+      if (result.success) {
+        toast({
+          title: "Success",
+          description: result.message || `Password reset successfully for ${resetPasswordEmail}`,
+        })
+        setResetPasswordUserId(null)
+        setResetPasswordEmail("")
+        setNewPassword("")
+        setConfirmPassword("")
+      } else {
+        toast({
+          title: "Error",
+          description: result.error || "Failed to reset password",
+          variant: "destructive",
+        })
+      }
+    } catch (error: any) {
+      toast({
+        title: "Error",
+        description: error.message || "Failed to reset password",
+        variant: "destructive",
+      })
+    } finally {
+      setResetPasswordLoading(false)
+    }
+  }
+
+  const openResetPasswordDialog = (userId: string, userEmail: string) => {
+    setResetPasswordUserId(userId)
+    setResetPasswordEmail(userEmail)
+    setNewPassword("")
+    setConfirmPassword("")
+  }
+
+  const getRoleBadgeVariant = (role: UserRole) => {
+    switch (role) {
+      case "admin":
+        return "destructive"
+      case "publisher":
+        return "default"
+      case "subscriber":
+        return "secondary"
+      default:
+        return "outline"
+    }
+  }
+
+  // Separate and sort users by role
+  const usersByRole = useMemo(() => {
+    const admins = sortUsersAlphabetically(users.filter((u) => u.role === "admin"))
+    const publishers = sortUsersAlphabetically(users.filter((u) => u.role === "publisher"))
+    const subscribers = sortUsersAlphabetically(users.filter((u) => u.role === "subscriber"))
+    return { admins, publishers, subscribers }
+  }, [users])
+
+  // Filter users for All Users tab based on search
+  const filteredUsers = useMemo(() => {
+    const sorted = sortUsersAlphabetically(users)
+    if (!searchQuery.trim()) return sorted
+    const q = searchQuery.trim().toLowerCase()
+    return sorted.filter(
+      (u) =>
+        u.email.toLowerCase().includes(q) ||
+        (u.displayName || "").toLowerCase().includes(q) ||
+        u.role.toLowerCase().includes(q)
+    )
+  }, [users, searchQuery])
+
+  const getStats = () => {
+    const total = users.length
+    const active = users.filter((u) => u.isActive).length
+    const byRole = users.reduce(
+      (acc, user) => {
+        acc[user.role] = (acc[user.role] || 0) + 1
+        return acc
+      },
+      {} as Record<UserRole, number>,
+    )
+
+    return { total, active, byRole }
+  }
+
+  const stats = getStats()
+
+  if (authLoading || loading) {
+    return (
+      <div className="flex items-center justify-center p-8">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
+      </div>
+    )
+  }
+
+  if (!userProfile || userProfile.role !== "admin") {
+    return (
+      <div className="p-8 text-center text-muted-foreground text-sm">Administrator session required.</div>
+    )
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Stats Cards - Collapsible on Mobile */}
+      <Collapsible 
+        open={isMobile ? statsOpen : true} 
+        onOpenChange={setStatsOpen}
+        className="md:!block"
+      >
+        <CollapsibleTrigger asChild className="md:hidden w-full mb-2">
+          <Button variant="outline" className="w-full justify-between">
+            <span className="flex items-center gap-2">
+              <Users className="h-4 w-4" />
+              Statistics
+            </span>
+            {statsOpen ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+          </Button>
+        </CollapsibleTrigger>
+        <CollapsibleContent className="md:!block">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <Card>
+              <CardContent className="p-4">
+                <div className="flex items-center space-x-2">
+                  <Users className="h-4 w-4 text-muted-foreground" />
+                  <div>
+                    <p className="text-sm font-medium">Total Users</p>
+                    <p className="text-2xl font-bold">{stats.total}</p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardContent className="p-4">
+                <div className="flex items-center space-x-2">
+                  <UserCheck className="h-4 w-4 text-green-600" />
+                  <div>
+                    <p className="text-sm font-medium">Active Users</p>
+                    <p className="text-2xl font-bold">{stats.active}</p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardContent className="p-4">
+                <div>
+                  <p className="text-sm font-medium">Publishers</p>
+                  <p className="text-2xl font-bold">{stats.byRole.publisher || 0}</p>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardContent className="p-4">
+                <div>
+                  <p className="text-sm font-medium">Subscribers</p>
+                  <p className="text-2xl font-bold">{stats.byRole.subscriber || 0}</p>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        </CollapsibleContent>
+      </Collapsible>
+
+      {/* Create User Section */}
+      <Card>
+        <CardHeader>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div className="min-w-0">
+              <CardTitle>User Management</CardTitle>
+              <CardDescription>
+                {isKevShadow
+                  ? `Create and manage Kevionics shadow subscribers (@${KEVIONICS_EMAIL_DOMAIN}). Publishers and live streams stay shared with the main deployment.`
+                  : `Create and manage user accounts for ${PRODUCT_DISPLAY_NAME}`}
+              </CardDescription>
+            </div>
+            <div className="flex w-full flex-col gap-2 sm:w-auto sm:min-w-0 sm:flex-row sm:shrink-0">
+              <Button
+                type="button"
+                variant="outline"
+                className="w-full gap-2 sm:w-auto"
+                disabled={listRefreshing}
+                onClick={() => void handleRefreshUserList()}
+              >
+                {listRefreshing ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <RefreshCw className="h-4 w-4" />
+                )}
+                Refresh list
+              </Button>
+              <Button
+                className="w-full sm:w-auto"
+                onClick={() => {
+                  const next = !showCreateForm
+                  setShowCreateForm(next)
+                  if (next) {
+                    setBulkSkippedNames([])
+                    setBulkCreatedCount(null)
+                    setError("")
+                    setSuccess("")
+                  }
+                }}
+              >
+                <Plus className="h-4 w-4 mr-2" />
+                Create User
+              </Button>
+            </div>
+          </div>
+        </CardHeader>
+
+        {showCreateForm && (
+          <CardContent className="border-t">
+            <Tabs defaultValue="single" className="w-full max-w-2xl space-y-4">
+              <TabsList className="grid w-full max-w-md grid-cols-2">
+                <TabsTrigger value="single">Single user</TabsTrigger>
+                <TabsTrigger value="bulk" className="gap-1">
+                  <ListTree className="h-3.5 w-3.5" />
+                  Bulk from names
+                </TabsTrigger>
+              </TabsList>
+
+              {error && (
+                <Alert variant="destructive">
+                  <AlertDescription>{error}</AlertDescription>
+                </Alert>
+              )}
+
+              {success && (
+                <Alert>
+                  <AlertDescription>{success}</AlertDescription>
+                </Alert>
+              )}
+
+              <TabsContent value="single" className="space-y-4 mt-0">
+                <form onSubmit={handleCreateUser} className="space-y-4 max-w-md">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <Label htmlFor="email">Email</Label>
+                      <Input
+                        id="email"
+                        type="email"
+                        value={email}
+                        onChange={(e) => setEmail(e.target.value)}
+                        required
+                        className={emailExists ? "border-destructive" : ""}
+                      />
+                      {emailExists && (
+                        <p className="text-xs text-destructive">This email is already registered</p>
+                      )}
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label htmlFor="password">Password</Label>
+                      <Input
+                        id="password"
+                        type="password"
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        required
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <Label htmlFor="displayName">Display Name</Label>
+                      <Input
+                        id="displayName"
+                        value={displayName}
+                        onChange={(e) => setDisplayName(e.target.value)}
+                        placeholder="Optional"
+                      />
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label htmlFor="role">Role</Label>
+                      <Select value={role} onValueChange={(value: UserRole) => setRole(value)}>
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {!isKevShadow && (
+                            <>
+                              <SelectItem value="admin">Admin</SelectItem>
+                              <SelectItem value="publisher">Publisher</SelectItem>
+                            </>
+                          )}
+                          <SelectItem value="subscriber">Subscriber</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-col sm:flex-row gap-2">
+                    <Button type="submit" disabled={createLoading || emailExists}>
+                      {createLoading ? "Creating..." : "Create User"}
+                    </Button>
+                    <Button type="button" variant="outline" onClick={() => setShowCreateForm(false)}>
+                      Cancel
+                    </Button>
+                  </div>
+                </form>
+              </TabsContent>
+
+              <TabsContent value="bulk" className="space-y-4 mt-0">
+                <p className="text-sm text-muted-foreground">
+                  Paste one name per line (or separate with commas). Each person gets login{" "}
+                  <code className="text-xs rounded bg-muted px-1 py-0.5">name→email</code> as the name lowercased with
+                  spaces removed, plus your domain. One shared password for everyone in this batch.
+                </p>
+                <form onSubmit={handleBulkCreateUsers} className="space-y-4">
+                  <div className="space-y-2">
+                    <Label htmlFor="bulk-names">Names</Label>
+                    <Textarea
+                      id="bulk-names"
+                      placeholder={"Quinn\nKyle\nArthur"}
+                      value={bulkNamesText}
+                      onChange={(e) => setBulkNamesText(e.target.value)}
+                      rows={8}
+                      className="font-mono text-sm"
+                      disabled={bulkLoading}
+                    />
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <Label htmlFor="bulk-domain">Email domain</Label>
+                      <Input
+                        id="bulk-domain"
+                        type="text"
+                        value={bulkEmailDomain}
+                        onChange={(e) => setBulkEmailDomain(e.target.value)}
+                        placeholder="sportsmagician.com"
+                        autoComplete="off"
+                        disabled={bulkLoading || isKevShadow}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="bulk-password">Password (all new users)</Label>
+                      <Input
+                        id="bulk-password"
+                        type="password"
+                        value={bulkPassword}
+                        onChange={(e) => setBulkPassword(e.target.value)}
+                        required
+                        minLength={6}
+                        disabled={bulkLoading}
+                      />
+                    </div>
+                  </div>
+                  <div className="space-y-2 max-w-xs">
+                    <Label htmlFor="bulk-role">Role</Label>
+                    <Select
+                      value={bulkRole}
+                      onValueChange={(v: "subscriber" | "publisher") => setBulkRole(v)}
+                      disabled={bulkLoading || isKevShadow}
+                    >
+                      <SelectTrigger id="bulk-role">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="subscriber">Subscriber</SelectItem>
+                        {!isKevShadow && <SelectItem value="publisher">Publisher</SelectItem>}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="flex flex-col sm:flex-row gap-2">
+                    <Button type="submit" disabled={bulkLoading}>
+                      {bulkLoading ? "Creating..." : "Create accounts"}
+                    </Button>
+                    <Button type="button" variant="outline" onClick={() => setShowCreateForm(false)} disabled={bulkLoading}>
+                      Cancel
+                    </Button>
+                  </div>
+                </form>
+
+                {bulkCreatedCount !== null && (
+                  <p className="text-sm font-medium">
+                    Created: {bulkCreatedCount}
+                    {bulkSkippedNames.length > 0 ? ` · Not created / failed: ${bulkSkippedNames.length}` : ""}
+                  </p>
+                )}
+
+                {bulkSkippedNames.length > 0 && (
+                  <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3 space-y-2">
+                    <p className="text-sm font-medium text-destructive">Not created (skipped or error)</p>
+                    <ul className="text-sm space-y-1 max-h-48 overflow-y-auto list-disc pl-5">
+                      {bulkSkippedNames.map((row, i) => (
+                        <li key={`${row.email}-${i}`}>
+                          <span className="font-medium">{row.name}</span>
+                          {row.email ? (
+                            <>
+                              {" "}
+                              <span className="text-muted-foreground">({row.email})</span>
+                            </>
+                          ) : null}
+                          {" — "}
+                          {row.reason}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </TabsContent>
+            </Tabs>
+          </CardContent>
+        )}
+      </Card>
+
+      {/* Users Table with Tabs by Role */}
+      <Card>
+        <CardHeader>
+          <CardTitle>{isKevShadow ? "Kevionics shadow subscribers" : "Users by Role"}</CardTitle>
+          <CardDescription>
+            {isKevShadow
+              ? "Only @kevionics.com subscribers you manage (sorted alphabetically)."
+              : "View and manage users organized by their roles (sorted alphabetically)"}
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {isKevShadow ? (
+            usersByRole.subscribers.length === 0 ? (
+              <div className="text-center py-8 text-muted-foreground">No subscribers found</div>
+            ) : (
+              <UserTable
+                users={usersByRole.subscribers}
+                onToggleStatus={handleToggleUserStatus}
+                onToggleChat={handleToggleChat}
+                getRoleBadgeVariant={getRoleBadgeVariant}
+                onResetPassword={openResetPasswordDialog}
+              />
+            )
+          ) : (
+          <Tabs defaultValue="all" className="space-y-4">
+            <TabsList className="grid w-full grid-cols-2 sm:grid-cols-4 h-auto overflow-x-auto">
+              <TabsTrigger value="all" className="flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 py-2 sm:py-1.5 text-xs sm:text-sm">
+                <Users className="h-3 w-3 sm:h-4 sm:w-4" />
+                <span className="hidden xs:inline">All Users</span>
+                <span className="xs:hidden">All</span>
+                <span className="text-xs">({users.length})</span>
+              </TabsTrigger>
+              <TabsTrigger value="admins" className="flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 py-2 sm:py-1.5 text-xs sm:text-sm">
+                <Shield className="h-3 w-3 sm:h-4 sm:w-4" />
+                <span className="hidden xs:inline">Admins</span>
+                <span className="xs:hidden">Admin</span>
+                <span className="text-xs">({usersByRole.admins.length})</span>
+              </TabsTrigger>
+              <TabsTrigger value="publishers" className="flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 py-2 sm:py-1.5 text-xs sm:text-sm">
+                <Video className="h-3 w-3 sm:h-4 sm:w-4" />
+                <span className="hidden xs:inline">Publishers</span>
+                <span className="xs:hidden">Pub</span>
+                <span className="text-xs">({usersByRole.publishers.length})</span>
+              </TabsTrigger>
+              <TabsTrigger value="subscribers" className="flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 py-2 sm:py-1.5 text-xs sm:text-sm">
+                <Eye className="h-3 w-3 sm:h-4 sm:w-4" />
+                <span className="hidden xs:inline">Subscribers</span>
+                <span className="xs:hidden">Sub</span>
+                <span className="text-xs">({usersByRole.subscribers.length})</span>
+              </TabsTrigger>
+            </TabsList>
+
+            <TabsContent value="all" className="space-y-4">
+              <div className="relative max-w-sm">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                <Input
+                  placeholder="Search by email, name, or role..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="pl-9"
+                />
+              </div>
+              {filteredUsers.length === 0 ? (
+                <div className="text-center py-8 text-muted-foreground">
+                  {searchQuery.trim() ? "No users match your search." : "No users found."}
+                </div>
+              ) : (
+                <UserTable 
+                  users={filteredUsers} 
+                  onToggleStatus={handleToggleUserStatus} 
+                  onToggleChat={handleToggleChat}
+                  getRoleBadgeVariant={getRoleBadgeVariant}
+                  onResetPassword={openResetPasswordDialog}
+                />
+              )}
+            </TabsContent>
+
+            <TabsContent value="admins">
+              {usersByRole.admins.length === 0 ? (
+                <div className="text-center py-8 text-muted-foreground">No admins found</div>
+              ) : (
+                <UserTable 
+                  users={usersByRole.admins} 
+                  onToggleStatus={handleToggleUserStatus} 
+                  onToggleChat={handleToggleChat}
+                  getRoleBadgeVariant={getRoleBadgeVariant}
+                  onResetPassword={openResetPasswordDialog}
+                />
+              )}
+            </TabsContent>
+
+            <TabsContent value="publishers">
+              {usersByRole.publishers.length === 0 ? (
+                <div className="text-center py-8 text-muted-foreground">No publishers found</div>
+              ) : (
+                <UserTable 
+                  users={usersByRole.publishers} 
+                  onToggleStatus={handleToggleUserStatus} 
+                  onToggleChat={handleToggleChat}
+                  getRoleBadgeVariant={getRoleBadgeVariant}
+                  onResetPassword={openResetPasswordDialog}
+                />
+              )}
+            </TabsContent>
+
+            <TabsContent value="subscribers">
+              {usersByRole.subscribers.length === 0 ? (
+                <div className="text-center py-8 text-muted-foreground">No subscribers found</div>
+              ) : (
+                <UserTable 
+                  users={usersByRole.subscribers} 
+                  onToggleStatus={handleToggleUserStatus} 
+                  onToggleChat={handleToggleChat}
+                  getRoleBadgeVariant={getRoleBadgeVariant}
+                  onResetPassword={openResetPasswordDialog}
+                />
+              )}
+            </TabsContent>
+          </Tabs>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Password Reset Dialog */}
+      <Dialog open={resetPasswordUserId !== null} onOpenChange={(open) => !open && setResetPasswordUserId(null)}>
+        <DialogContent className="sm:max-w-[425px]">
+          <DialogHeader>
+            <DialogTitle>Reset Password</DialogTitle>
+            <DialogDescription>
+              Reset password for {resetPasswordEmail}. The new password must be at least 6 characters long.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label htmlFor="newPassword">New Password</Label>
+              <Input
+                id="newPassword"
+                type="password"
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+                placeholder="Enter new password"
+                disabled={resetPasswordLoading}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="confirmPassword">Confirm Password</Label>
+              <Input
+                id="confirmPassword"
+                type="password"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                placeholder="Confirm new password"
+                disabled={resetPasswordLoading}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setResetPasswordUserId(null)
+                setNewPassword("")
+                setConfirmPassword("")
+              }}
+              disabled={resetPasswordLoading}
+            >
+              Cancel
+            </Button>
+            <Button onClick={handleResetPassword} disabled={resetPasswordLoading}>
+              {resetPasswordLoading ? "Resetting..." : "Reset Password"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  )
+}
+
+// Reusable User Table Component
+function UserTable({
+  users,
+  onToggleStatus,
+  onToggleChat,
+  getRoleBadgeVariant,
+  onResetPassword,
+}: {
+  users: (UserProfile & { id: string })[]
+  onToggleStatus: (userId: string, currentStatus: boolean) => void
+  onToggleChat: (userId: string, currentValue: boolean) => void
+  getRoleBadgeVariant: (role: UserRole) => any
+  onResetPassword: (userId: string, userEmail: string) => void
+}) {
+  return (
+    <div className="overflow-x-auto -mx-4 sm:mx-0">
+      <div className="inline-block min-w-full align-middle px-4 sm:px-0">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead className="min-w-[150px]">Email</TableHead>
+              <TableHead className="hidden sm:table-cell min-w-[120px]">Display Name</TableHead>
+              <TableHead className="min-w-[80px]">Role</TableHead>
+              <TableHead className="min-w-[100px]">Status</TableHead>
+              <TableHead className="hidden md:table-cell min-w-[120px]">Created</TableHead>
+              <TableHead className="min-w-[80px]">Active</TableHead>
+              <TableHead className="min-w-[90px]">
+                <span className="flex items-center gap-1">
+                  <MessageSquare className="h-3.5 w-3.5" />
+                  Chat
+                </span>
+              </TableHead>
+              <TableHead className="min-w-[100px]">Actions</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {users.map((user) => (
+              <TableRow key={user.id}>
+                <TableCell className="font-medium">
+                  <div className="flex flex-col sm:flex-row items-start sm:items-center gap-1 sm:gap-2">
+                    <span className="break-words">{user.email}</span>
+                    {(user as any).isPending && (
+                      <Badge variant="outline" className="text-xs bg-yellow-50 text-yellow-700 border-yellow-300 whitespace-nowrap">
+                        Pending
+                      </Badge>
+                    )}
+                  </div>
+                  <div className="sm:hidden text-xs text-muted-foreground mt-1">
+                    {user.displayName || "No name"}
+                  </div>
+                </TableCell>
+                <TableCell className="hidden sm:table-cell">{user.displayName || "-"}</TableCell>
+                <TableCell>
+                  <Badge variant={getRoleBadgeVariant(user.role)} className="text-xs">{user.role}</Badge>
+                </TableCell>
+                <TableCell>
+                  <div className="flex items-center space-x-1 sm:space-x-2">
+                    {(user as any).isPending ? (
+                      <>
+                        <div className="h-3 w-3 sm:h-4 sm:w-4 rounded-full bg-yellow-400 animate-pulse flex-shrink-0" />
+                        <span className="text-xs sm:text-sm text-yellow-600 hidden sm:inline">Pending Login</span>
+                        <span className="text-xs text-yellow-600 sm:hidden">Pending</span>
+                      </>
+                    ) : user.isActive ? (
+                      <>
+                        <UserCheck className="h-3 w-3 sm:h-4 sm:w-4 text-green-600 flex-shrink-0" />
+                        <span className="text-xs sm:text-sm text-green-600">Active</span>
+                      </>
+                    ) : (
+                      <>
+                        <UserX className="h-3 w-3 sm:h-4 sm:w-4 text-red-600 flex-shrink-0" />
+                        <span className="text-xs sm:text-sm text-red-600">Inactive</span>
+                      </>
+                    )}
+                  </div>
+                </TableCell>
+                <TableCell className="hidden md:table-cell">
+                  {(() => {
+                    const date = convertTimestampToDate(user.createdAt)
+                    if (!date) return "-"
+                    try {
+                      return (
+                        <div className="flex flex-col">
+                          <span className="font-medium text-xs sm:text-sm">{date.toLocaleDateString()}</span>
+                          <span className="text-xs text-muted-foreground">{date.toLocaleTimeString()}</span>
+                        </div>
+                      )
+                    } catch (e) {
+                      return "-"
+                    }
+                  })()}
+                </TableCell>
+                <TableCell>
+                  {(user as any).isPending ? (
+                    <span className="text-xs text-muted-foreground">
+                      Waiting
+                    </span>
+                  ) : (
+                    <Switch
+                      checked={user.isActive}
+                      onCheckedChange={() => onToggleStatus(user.id, user.isActive)}
+                    />
+                  )}
+                </TableCell>
+                <TableCell>
+                  {user.role === "subscriber" && !(user as any).isPending ? (
+                    <Switch
+                      checked={(user as any).allowChat ?? false}
+                      onCheckedChange={() => onToggleChat(user.id, (user as any).allowChat ?? false)}
+                    />
+                  ) : (
+                    <span className="text-xs text-muted-foreground">—</span>
+                  )}
+                </TableCell>
+                <TableCell>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => onResetPassword(user.id, user.email)}
+                    className="h-8 text-xs"
+                  >
+                    <KeyRound className="h-3 w-3 mr-1" />
+                    <span className="hidden sm:inline">Reset Password</span>
+                    <span className="sm:hidden">Reset</span>
+                  </Button>
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
+    </div>
+  )
+}
+

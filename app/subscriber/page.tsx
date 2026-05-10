@@ -1,0 +1,196 @@
+"use client"
+
+import { ProtectedRoute } from "@/components/auth/protected-route"
+import { RealTimeStreams } from "@/components/subscriber/real-time-streams"
+import { TodaysSchedule } from "@/components/subscriber/todays-schedule"
+import { SubscriberScheduledCalls } from "@/components/subscriber/scheduled-calls-subscriber"
+import { SubscriberNotifications } from "@/components/subscriber/subscriber-notifications"
+import { Button } from "@/components/ui/button"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Alert, AlertDescription } from "@/components/ui/alert"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet"
+import { signOut } from "@/lib/auth"
+import { useAuth } from "@/hooks/use-auth"
+import { useRouter } from "next/navigation"
+import { useEffect, useRef, useState } from "react"
+import { Radio, LogOut, AlertTriangle, UserX, Calendar, Menu, Bell, Phone } from "lucide-react"
+import { toast } from "@/hooks/use-toast"
+import { PRODUCT_DISPLAY_NAME } from "@/lib/branding"
+
+export default function SubscriberDashboard() {
+  const { user, userProfile } = useAuth()
+  const router = useRouter()
+  const previousActiveStatus = useRef<boolean | null>(null)
+  const [menuOpen, setMenuOpen] = useState(false)
+  const [activeTab, setActiveTab] = useState("streams")
+
+  // Monitor for real-time changes to active status
+  useEffect(() => {
+    if (userProfile && previousActiveStatus.current !== null) {
+      // Status changed
+      if (userProfile.isActive !== previousActiveStatus.current) {
+        if (userProfile.isActive) {
+          toast({
+            title: "Account Activated",
+            description: "Your account has been reactivated by an administrator. You can now access all content.",
+            variant: "default",
+          })
+        } else {
+          toast({
+            title: "Account Deactivated",
+            description: "Your account has been deactivated by an administrator. You can no longer access content.",
+            variant: "destructive",
+          })
+        }
+      }
+    }
+    
+    if (userProfile) {
+      previousActiveStatus.current = userProfile.isActive
+    }
+  }, [userProfile?.isActive])
+
+  const handleSignOut = async () => {
+    setMenuOpen(false)
+    await signOut()
+    router.push("/")
+  }
+
+  return (
+    <ProtectedRoute allowedRoles={["subscriber"]}>
+      <div className="min-h-screen bg-background">
+        {/* Header */}
+        <header className="border-b bg-card">
+          <div className="container mx-auto px-4 py-4">
+            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+              <div className="flex items-center space-x-4 min-w-0">
+                <Radio className="h-6 w-6 flex-shrink-0" />
+                <div className="min-w-0">
+                  <h1 className="text-xl sm:text-2xl font-bold truncate">{PRODUCT_DISPLAY_NAME}</h1>
+                  <p className="text-sm sm:text-base text-muted-foreground truncate">
+                    Subscriber · {userProfile?.displayName || userProfile?.email}
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 w-full sm:w-auto">
+                <Button variant="outline" onClick={handleSignOut} className="hidden sm:flex flex-1 sm:flex-initial">
+                  <LogOut className="h-4 w-4 mr-2" />
+                  Sign Out
+                </Button>
+                <Sheet open={menuOpen} onOpenChange={setMenuOpen}>
+                  <SheetTrigger asChild>
+                    <Button variant="outline" size="icon" type="button" className="sm:hidden shrink-0" aria-label="Open menu">
+                      <Menu className="h-4 w-4" />
+                    </Button>
+                  </SheetTrigger>
+                  <SheetContent side="bottom" className="rounded-t-2xl">
+                    <SheetHeader>
+                      <SheetTitle>Menu</SheetTitle>
+                    </SheetHeader>
+                    <div className="py-4">
+                      <Button variant="outline" className="w-full justify-start" onClick={handleSignOut}>
+                        <LogOut className="h-4 w-4 mr-2" />
+                        Sign Out
+                      </Button>
+                    </div>
+                  </SheetContent>
+                </Sheet>
+              </div>
+            </div>
+          </div>
+        </header>
+
+        {/* Main Content */}
+        <main className="container mx-auto px-2 sm:px-4 py-4 sm:py-8">
+          {/* Check if user is inactive */}
+          {userProfile && !userProfile.isActive ? (
+            <Card className="border-destructive">
+              <CardHeader>
+                <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3">
+                  <div className="p-3 rounded-full bg-destructive/10 flex-shrink-0">
+                    <UserX className="h-6 w-6 sm:h-8 sm:w-8 text-destructive" />
+                  </div>
+                  <div className="min-w-0">
+                    <CardTitle className="text-xl sm:text-2xl">Account Inactive</CardTitle>
+                    <CardDescription>Your access has been temporarily disabled</CardDescription>
+                  </div>
+                </div>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <Alert variant="destructive">
+                  <AlertTriangle className="h-4 w-4" />
+                  <AlertDescription>
+                    Your account is currently inactive. You are unable to access streams and content at this time.
+                  </AlertDescription>
+                </Alert>
+
+                <div className="space-y-2 text-muted-foreground">
+                  <p>
+                    Your account has been deactivated by an administrator. This means:
+                  </p>
+                  <ul className="list-disc list-inside space-y-1 ml-4">
+                    <li>You cannot listen to any audio streams</li>
+                    <li>All your assigned content is temporarily hidden</li>
+                  </ul>
+                  <p className="mt-4 font-medium">
+                    Please contact your administrator to reactivate your account.
+                  </p>
+                </div>
+
+                <div className="flex gap-2 pt-4">
+                  <Button variant="outline" onClick={handleSignOut} className="hidden sm:inline-flex">
+                    <LogOut className="h-4 w-4 mr-2" />
+                    Sign Out
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          ) : (
+            // Active user - show normal content
+            <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4 sm:space-y-6">
+              <TabsList className="grid w-full grid-cols-2 sm:grid-cols-4 h-auto gap-1">
+                <TabsTrigger value="streams" className="flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 py-2 sm:py-1.5 text-xs sm:text-sm">
+                  <Radio className="h-3 w-3 sm:h-4 sm:w-4" />
+                  <span className="hidden xs:inline">Audio Streams</span>
+                  <span className="xs:hidden">Streams</span>
+                </TabsTrigger>
+                <TabsTrigger value="scheduled-calls" className="flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 py-2 sm:py-1.5 text-xs sm:text-sm">
+                  <Phone className="h-3 w-3 sm:h-4 sm:w-4" />
+                  <span className="hidden xs:inline">Scheduled calls</span>
+                  <span className="xs:hidden">Calls</span>
+                </TabsTrigger>
+                <TabsTrigger value="notifications" className="flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 py-2 sm:py-1.5 text-xs sm:text-sm">
+                  <Bell className="h-3 w-3 sm:h-4 sm:w-4" />
+                  <span className="hidden xs:inline">Notifications</span>
+                  <span className="xs:hidden">Alerts</span>
+                </TabsTrigger>
+                <TabsTrigger value="schedule" className="flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 py-2 sm:py-1.5 text-xs sm:text-sm">
+                  <Calendar className="h-3 w-3 sm:h-4 sm:w-4" />
+                  <span className="hidden xs:inline">Today&apos;s Schedule</span>
+                  <span className="xs:hidden">Schedule</span>
+                </TabsTrigger>
+              </TabsList>
+
+              <TabsContent value="streams">
+                <RealTimeStreams />
+              </TabsContent>
+
+              <TabsContent value="scheduled-calls">
+                {user?.uid ? <SubscriberScheduledCalls userId={user.uid} /> : null}
+              </TabsContent>
+
+              <TabsContent value="notifications">
+                <SubscriberNotifications />
+              </TabsContent>
+
+              <TabsContent value="schedule">
+                <TodaysSchedule />
+              </TabsContent>
+            </Tabs>
+          )}
+        </main>
+      </div>
+    </ProtectedRoute>
+  )
+}

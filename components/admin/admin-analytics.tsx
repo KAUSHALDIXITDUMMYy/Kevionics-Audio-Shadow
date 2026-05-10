@@ -424,16 +424,16 @@ export function AdminAnalytics() {
             </CardContent>
           </Card>
 
-          <Card className="border bg-card border-orange-200/80 dark:border-orange-800">
+          <Card className="border bg-card border-chart-2/30">
             <CardContent className="p-6">
               <div className="flex items-start justify-between">
                 <div className="space-y-2">
-                  <p className="text-sm font-medium text-orange-700 dark:text-orange-300">Avg. Watch Time</p>
-                  <p className="text-3xl font-bold text-orange-900 dark:text-orange-100">{formatDuration(summary.averageViewDuration)}</p>
-                  <p className="text-xs text-orange-600 dark:text-orange-400">per viewing session</p>
+                  <p className="text-sm font-medium text-chart-2">Avg. Watch Time</p>
+                  <p className="text-3xl font-bold text-foreground">{formatDuration(summary.averageViewDuration)}</p>
+                  <p className="text-xs text-muted-foreground">per viewing session</p>
                 </div>
-                <div className="p-3 rounded-full bg-orange-600 dark:bg-orange-500">
-                  <Clock className="h-5 w-5 text-white" />
+                <div className="p-3 rounded-full bg-primary text-primary-foreground">
+                  <Clock className="h-5 w-5" />
                 </div>
               </div>
             </CardContent>

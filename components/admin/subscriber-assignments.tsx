@@ -454,7 +454,7 @@ export function SubscriberAssignments() {
                 onClick={assignAllToAll}
                 disabled={bulkLoading}
                 variant="outline"
-                className="border-2 border-orange-500 text-orange-600 hover:bg-orange-50 dark:hover:bg-orange-950/20 w-full sm:w-auto"
+                className="border-2 border-primary text-primary hover:bg-muted/70 dark:hover:bg-muted/40 w-full sm:w-auto"
                 size="sm"
               >
                 {bulkLoading ? (

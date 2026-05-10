@@ -222,7 +222,7 @@ export function PublisherAnalytics() {
           <Card>
             <CardContent className="p-4">
               <div className="flex items-center space-x-2">
-                <Play className="h-4 w-4 text-orange-600" />
+                <Play className="h-4 w-4 text-chart-1" />
                 <div>
                   <p className="text-sm font-medium">Total Streams</p>
                   <p className="text-2xl font-bold">{summary.totalStreams || 0}</p>
@@ -279,7 +279,7 @@ export function PublisherAnalytics() {
                     <p className="text-sm text-muted-foreground">Unique Viewers</p>
                   </div>
                   <div className="text-center">
-                    <p className="text-2xl font-bold text-orange-600">
+                    <p className="text-2xl font-bold text-chart-3">
                       {formatDuration(Math.round(streamStats.averageViewDuration))}
                     </p>
                     <p className="text-sm text-muted-foreground">Avg. View Duration</p>

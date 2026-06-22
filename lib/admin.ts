@@ -257,11 +257,9 @@ export const logoutAllUsers = async (adminViewer?: UserProfile | null) => {
 
 export const resetUserPassword = async (userId: string, newPassword: string, adminId: string) => {
   try {
-    const response = await fetch("/api/admin/reset-password", {
+    const { fetchWithAuth } = await import("@/lib/client/authenticated-fetch")
+    const response = await fetchWithAuth("/api/admin/reset-password", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
       body: JSON.stringify({
         userId,
         newPassword,

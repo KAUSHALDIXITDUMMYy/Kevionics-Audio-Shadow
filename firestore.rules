@@ -1,0 +1,43 @@
+rules_version = '2';
+
+// Phase 1 — Publish in Firebase Console → Firestore → Rules → Publish
+//
+// • Blocks clone sites with NO Firebase login (they lose live DB sync).
+// • Any logged-in user (web / Android / iOS) can use the app normally.
+// • Tighter per-role rules can be added later once everything is stable.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    // First login: app reads pending user before Auth account exists.
+    match /users/{userId} {
+      allow read: if signedIn() || resource.data.isPending == true;
+      allow create, update, delete: if signedIn();
+    }
+
+    // Contact form — no login required to submit.
+    match /contactMessages/{messageId} {
+      allow create: if request.resource.data.keys().hasAll(['name', 'email', 'subject', 'message']);
+      allow read, update, delete: if signedIn();
+    }
+
+    // Server-only (Admin SDK). Never allow client access.
+    match /mfaSecrets/{docId} {
+      allow read, write: if false;
+    }
+
+    match /cleanupLogs/{docId} {
+      allow read, write: if false;
+    }
+
+    // All other collections: must be signed in.
+    // Clone sites that only embed your public Firebase config are blocked here.
+    match /{document=**} {
+      allow read, write: if signedIn();
+    }
+  }
+}

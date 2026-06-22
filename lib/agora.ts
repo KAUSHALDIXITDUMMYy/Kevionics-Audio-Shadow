@@ -14,6 +14,7 @@ export type PublisherAudioSource = "microphone" | "system"
 
 export interface AgoraJoinConfig {
   channelName: string
+  streamSessionId?: string
   role: AgoraJoinRole
   uid?: number
   appId?: string
@@ -109,9 +110,15 @@ export class AgoraManager {
   private audienceRemoteTracks = new Map<string, IRemoteAudioTrack>()
   private audienceFlushAtMs = new Map<string, number>()
   private subscriberLatencyWatchdog: ReturnType<typeof setInterval> | null = null
-  private readonly SUBSCRIBER_AUDIO_DELAY_FLUSH_MS = 480
-  private readonly SUBSCRIBER_FLUSH_COOLDOWN_MS = 2800
-  private readonly SUBSCRIBER_LATENCY_POLL_MS = 1800
+  /** Flush playout when delay exceeds this (ms). Kept low so subscribers never sit on buffered audio. */
+  private readonly SUBSCRIBER_AUDIO_DELAY_FLUSH_MS = 120
+  /** Min gap between stop/play catch-ups per remote uid (ms). */
+  private readonly SUBSCRIBER_FLUSH_COOLDOWN_MS = 450
+  /** How often we poll remote track delay stats (ms). */
+  private readonly SUBSCRIBER_LATENCY_POLL_MS = 350
+  /** Agora network-quality: 4+ = poor/down — flush immediately for audience. */
+  private readonly SUBSCRIBER_NETWORK_POOR_THRESHOLD = 4
+  private subscriberNetworkQualityBound = false
 
   /** getDisplayMedia stream kept alive while publishing tab/system audio (video tracks disabled, not sent) */
   private displayCaptureStream: MediaStream | null = null
@@ -143,11 +150,16 @@ export class AgoraManager {
     return AgoraRTC as any
   }
 
-  private async fetchToken(channelName: string, role: AgoraJoinRole, uid?: number) {
-    const res = await fetch("/api/agora/token", {
+  private async fetchToken(
+    channelName: string,
+    role: AgoraJoinRole,
+    uid?: number,
+    streamSessionId?: string,
+  ) {
+    const { fetchWithAuth } = await import("@/lib/client/authenticated-fetch")
+    const res = await fetchWithAuth("/api/agora/token", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ channelName, role, uid }),
+      body: JSON.stringify({ channelName, role, uid, streamSessionId }),
     })
     const data = await res.json()
     if (!res.ok) throw new Error(data?.error || "Failed to fetch Agora token")
@@ -174,14 +186,14 @@ export class AgoraManager {
     if (!config?.channelName) {
       throw new Error("Agora join requires a valid channelName")
     }
-    const { channelName, role, uid, container } = config
+    const { channelName, role, uid, container, streamSessionId } = config
     this.lastJoinConfig = config
 
     if (this.client) {
       await this.leaveInternal()
     }
 
-    const tokenInfo = await this.fetchToken(channelName, role, uid)
+    const tokenInfo = await this.fetchToken(channelName, role, uid, streamSessionId)
     const appId = tokenInfo.appId
     const token = tokenInfo.token
     const agoraUid = tokenInfo.uid
@@ -225,6 +237,7 @@ export class AgoraManager {
     if (role === "audience") {
       // Register before join so we never miss user-published during join.
       this.attachSubscriberAudioListeners(clientInstance, container)
+      this.attachSubscriberNetworkQualityFlush(clientInstance)
       this.startSubscriberAudioLatencyWatchdog(clientInstance)
     }
 
@@ -244,8 +257,22 @@ export class AgoraManager {
       clearInterval(this.subscriberLatencyWatchdog)
       this.subscriberLatencyWatchdog = null
     }
+    this.subscriberNetworkQualityBound = false
     this.audienceRemoteTracks.clear()
     this.audienceFlushAtMs.clear()
+  }
+
+  /** Drop buffered audio as soon as downlink degrades (before jitter buffer grows). */
+  private attachSubscriberNetworkQualityFlush(clientInstance: IAgoraRTCClient) {
+    if (this.subscriberNetworkQualityBound) return
+    this.subscriberNetworkQualityBound = true
+    clientInstance.on("network-quality", (stats: { downlinkNetworkQuality?: number }) => {
+      if (this.client !== clientInstance) return
+      if (this.lastJoinConfig?.role !== "audience") return
+      const downlink = stats?.downlinkNetworkQuality ?? -1
+      if (downlink < this.SUBSCRIBER_NETWORK_POOR_THRESHOLD) return
+      this.forceFlushSubscriberPlayback()
+    })
   }
 
   /** Poll playback delay; when the jitter buffer is too large, restart play to stay near live. */
@@ -336,6 +363,10 @@ export class AgoraManager {
         console.warn("Failed to configure remote audio processing:", procErr)
       }
       this.audienceRemoteTracks.set(uidKey, remoteAudioTrack)
+      // After play starts, shed any initial jitter buffer so we begin at live edge.
+      window.setTimeout(() => {
+        this.maybeFlushSubscriberAudioCatchup(remoteAudioTrack, uidKey, true)
+      }, 400)
     } catch (e) {
       console.warn("remoteAudioTrack.play failed", e)
     }
@@ -571,7 +602,11 @@ export class AgoraManager {
     const AgoraRTC = await this.getAgora()
     const customAudio = await AgoraRTC.createCustomAudioTrack({
       mediaStreamTrack: audioTrack,
-      encoderConfig: "high_quality_stereo",
+      encoderConfig: {
+        sampleRate: 48000,
+        stereo: false,
+        bitrate: 64,
+      },
     })
     this.localAudio = customAudio
     this.publisherAudioMode = "system"
@@ -1002,9 +1037,9 @@ export class AgoraManager {
           autoGainControl: true,
           // Optimize for high quality audio with low latency
           encoderConfig: {
-            sampleRate: 48000, // High sample rate (48kHz) for professional quality
-            stereo: false, // Mono for lower latency (can enable stereo for even better quality if bandwidth allows)
-            bitrate: 128, // High bitrate (128 kbps) for crystal clear audio quality
+            sampleRate: 48000,
+            stereo: false,
+            bitrate: 64,
           },
         })
         
@@ -1036,11 +1071,11 @@ export class AgoraManager {
             // Set encoder configuration for optimal quality
             if (typeof this.localAudio.setEncoderConfiguration === 'function') {
               await this.localAudio.setEncoderConfiguration({
-                sampleRate: 48000, // 48kHz sample rate for professional quality
-                stereo: false, // Mono for lower latency (set to true for stereo if bandwidth allows)
-                bitrate: 128, // High bitrate (128 kbps) for crystal clear audio
+                sampleRate: 48000,
+                stereo: false,
+                bitrate: 64,
               })
-              console.log("Audio encoder configured for high quality (128 kbps, 48kHz)")
+              console.log("Audio encoder configured for low latency (64 kbps, 48kHz mono)")
             }
           } catch (encErr) {
             console.warn("Failed to configure audio encoder:", encErr)
@@ -1206,13 +1241,20 @@ export class AgoraManager {
       console.log("Agora connection state changed:", curState, "from", revState)
       if (this.client !== clientInstance) return
 
-      if (curState === "CONNECTED" && revState === "RECONNECTING" && this.lastJoinConfig?.role === "audience") {
-        this.forceFlushSubscriberPlayback()
+      if (this.lastJoinConfig?.role === "audience") {
+        if (curState === "RECONNECTING") {
+          // Drop buffered audio immediately when the link wavers — do not queue old packets.
+          this.forceFlushSubscriberPlayback()
+        }
+        if (curState === "CONNECTED" && revState === "RECONNECTING") {
+          this.forceFlushSubscriberPlayback()
+        }
       }
 
       if (curState === "DISCONNECTED") {
         const snapshot = this.lastJoinConfig
         if (!snapshot) return
+        const rejoinDelayMs = snapshot.role === "audience" ? 500 : 1500
 
         setTimeout(() => {
           void (async () => {
@@ -1224,7 +1266,7 @@ export class AgoraManager {
               console.warn("Rejoin attempt failed", e)
             }
           })()
-        }, 1500)
+        }, rejoinDelayMs)
       }
     })
 
@@ -1233,6 +1275,7 @@ export class AgoraManager {
       if (this.client !== clientInstance) return
       if (event?.code === 17 && this.lastJoinConfig) {
         const cfg = this.lastJoinConfig
+        const rejoinDelayMs = cfg.role === "audience" ? 600 : 2000
         setTimeout(() => {
           void (async () => {
             if (this.client !== clientInstance) return
@@ -1243,7 +1286,7 @@ export class AgoraManager {
               console.warn("Rejoin after exception failed", e)
             }
           })()
-        }, 2000)
+        }, rejoinDelayMs)
       }
     })
   }

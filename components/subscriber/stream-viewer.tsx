@@ -77,16 +77,14 @@ export const StreamViewer = forwardRef<StreamViewerHandle, StreamViewerProps>(fu
     setError("")
 
     try {
-      const [, approxLocation] = await Promise.all([
-        agoraManager.join({
-          channelName: permission.streamSession.roomId,
-          role: "audience",
-          container: jitsiContainerRef.current || document.body, // Container not needed for audio-only
-          width: "100%",
-          height: 500,
-        }),
-        skipActivityAnalytics ? Promise.resolve(undefined) : fetchApproximateViewerLocation(),
-      ])
+      await agoraManager.join({
+        channelName: permission.streamSession.roomId,
+        streamSessionId: permission.streamSession.id,
+        role: "audience",
+        container: jitsiContainerRef.current || document.body, // Container not needed for audio-only
+        width: "100%",
+        height: 500,
+      })
 
       if (!isMountedRef.current) {
         await agoraManager.leave()
@@ -105,16 +103,22 @@ export const StreamViewer = forwardRef<StreamViewerHandle, StreamViewerProps>(fu
       startSilentAudio()
 
       if (!skipActivityAnalytics) {
-        await trackSubscriberActivity({
-          streamSessionId: permission.streamSession.id!,
-          subscriberId: user.uid,
-          subscriberName: userProfile.displayName || userProfile.email,
-          publisherId: permission.publisherId,
-          publisherName: permission.publisherName,
-          action: "join",
-          subscriberTenant: resolveUserTenant(userProfile),
-          location: approxLocation ?? undefined,
-        })
+        void (async () => {
+          const approxLocation = await Promise.race([
+            fetchApproximateViewerLocation(),
+            new Promise<undefined>((resolve) => window.setTimeout(() => resolve(undefined), 1500)),
+          ])
+          await trackSubscriberActivity({
+            streamSessionId: permission.streamSession.id!,
+            subscriberId: user.uid,
+            subscriberName: userProfile.displayName || userProfile.email,
+            publisherId: permission.publisherId,
+            publisherName: permission.publisherName,
+            action: "join",
+            subscriberTenant: resolveUserTenant(userProfile),
+            location: approxLocation ?? undefined,
+          })
+        })()
       }
     } catch (err: any) {
       if (isMountedRef.current) {

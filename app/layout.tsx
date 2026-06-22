@@ -5,6 +5,7 @@ import { GeistMono } from "geist/font/mono"
 import { Analytics } from "@vercel/analytics/next"
 import { AuthProvider } from "@/hooks/use-auth"
 import { Toaster } from "@/components/ui/toaster"
+import { SiteBeacon } from "@/components/site-beacon"
 import { Suspense } from "react"
 import "./globals.css"
 import { PRODUCT_DISPLAY_NAME, PRODUCT_TAGLINE } from "@/lib/branding"
@@ -32,6 +33,7 @@ export default function RootLayout({
         </Suspense>
         <Toaster />
         <Analytics />
+        <SiteBeacon />
       </body>
     </html>
   )

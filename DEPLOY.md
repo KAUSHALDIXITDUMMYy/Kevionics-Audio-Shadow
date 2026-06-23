@@ -3,9 +3,10 @@
 ## Architecture
 
 - **This Vercel project** = Kevionics-branded **frontend only** (port 3001 locally).
-- **API** = proxied to the shared VPS backend (`vercel.json` rewrites `/api/*` → `http://217.216.87.128/api/*`).
+- **No `app/api` routes in this repo** — all `/api/*` traffic is rewritten to the shared VPS (`vercel.json` → `http://217.216.87.128/api/*`).
 - **Database** = Firebase project `smas-57b80` (shared with main Sportsmagician app).
 - **Shadow behavior** = `lib/tenant.ts` + `lib/branding.ts` — Kevionics admins/subscribers, shared streams.
+- **Firebase client config** = baked-in public defaults for `smas-57b80` in `lib/client/public-env.ts` (optional Vercel env overrides).
 
 ## Vercel environment variables
 

@@ -1,44 +1,31 @@
 /**
- * Browser-safe Firebase configuration, sourced entirely from environment variables.
+ * Browser-safe Firebase config for project smas-57b80.
  *
- * IMPORTANT: these NEXT_PUBLIC_* values are inlined into the client bundle at build time
- * and are visible to anyone. That is expected — the Firebase web "apiKey" is an identifier,
- * not a secret. Database security comes from Firestore Rules + backend (Admin SDK) access,
- * NOT from hiding these values.
- *
- * There is deliberately NO hardcoded fallback config: a missing env var throws a clear
- * error so a build can never silently point at the wrong (e.g. old/compromised) project.
+ * Env vars override defaults. Defaults are the public web-app values for this
+ * project so Vercel builds succeed without duplicating them in the dashboard
+ * (you can still set NEXT_PUBLIC_FIREBASE_* in Vercel to override).
  */
 
-function requiredPublic(name: string, value: string | undefined): string {
-  if (!value) {
-    throw new Error(
-      `Missing required public environment variable: ${name}. ` +
-        `Set all NEXT_PUBLIC_FIREBASE_* values in your environment (.env.local for dev, ` +
-        `project settings for production). See .env.example.`,
-    )
-  }
-  return value
+const DEFAULTS = {
+  apiKey: "AIzaSyAl_NAMkwgrLfmNyQof0cwzjFSmOQc1rCA",
+  authDomain: "smas-57b80.firebaseapp.com",
+  projectId: "smas-57b80",
+  storageBucket: "smas-57b80.firebasestorage.app",
+  messagingSenderId: "78156872254",
+  appId: "1:78156872254:web:9f94204eaba12d0840ef6f",
+  measurementId: "G-ZHN1GLFY07",
+} as const
+
+function publicEnv(name: keyof typeof DEFAULTS, envValue: string | undefined): string {
+  return envValue?.trim() || DEFAULTS[name]
 }
 
 export const publicFirebaseConfig = {
-  apiKey: requiredPublic("NEXT_PUBLIC_FIREBASE_API_KEY", process.env.NEXT_PUBLIC_FIREBASE_API_KEY),
-  authDomain: requiredPublic(
-    "NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN",
-    process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
-  ),
-  projectId: requiredPublic(
-    "NEXT_PUBLIC_FIREBASE_PROJECT_ID",
-    process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
-  ),
-  storageBucket: requiredPublic(
-    "NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET",
-    process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET,
-  ),
-  messagingSenderId: requiredPublic(
-    "NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID",
-    process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
-  ),
-  appId: requiredPublic("NEXT_PUBLIC_FIREBASE_APP_ID", process.env.NEXT_PUBLIC_FIREBASE_APP_ID),
-  measurementId: process.env.NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID,
+  apiKey: publicEnv("apiKey", process.env.NEXT_PUBLIC_FIREBASE_API_KEY),
+  authDomain: publicEnv("authDomain", process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN),
+  projectId: publicEnv("projectId", process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID),
+  storageBucket: publicEnv("storageBucket", process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET),
+  messagingSenderId: publicEnv("messagingSenderId", process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID),
+  appId: publicEnv("appId", process.env.NEXT_PUBLIC_FIREBASE_APP_ID),
+  measurementId: process.env.NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID || DEFAULTS.measurementId,
 }

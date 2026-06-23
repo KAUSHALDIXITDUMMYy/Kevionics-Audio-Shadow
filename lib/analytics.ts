@@ -1,9 +1,22 @@
-import { db } from "./firebase"
-import { collection, query, where, getDocs, addDoc, updateDoc, doc, orderBy, limit, onSnapshot } from "firebase/firestore"
+import { fetchWithAuth } from "@/lib/client/authenticated-fetch"
 import type { ViewerLocation } from "./viewer-location"
 import type { UserTenant } from "./tenant"
 
 export type { ViewerLocation } from "./viewer-location"
+
+const ENDPOINT = "/api/analytics"
+
+function toDate(value: unknown): Date {
+  if (value instanceof Date) return value
+  if (value && typeof (value as { toDate?: () => Date }).toDate === "function") {
+    return (value as { toDate: () => Date }).toDate()
+  }
+  if (typeof value === "string" || typeof value === "number") {
+    const parsed = new Date(value)
+    if (!Number.isNaN(parsed.getTime())) return parsed
+  }
+  return new Date()
+}
 
 export interface StreamAnalytics {
   id?: string
@@ -12,7 +25,7 @@ export interface StreamAnalytics {
   subscriberName: string
   publisherId: string
   publisherName: string
-  action: 'join' | 'leave' | 'viewing'
+  action: "join" | "leave" | "viewing"
   timestamp: Date
   duration?: number
 }
@@ -28,7 +41,6 @@ export interface StreamViewer {
   lastSeen: Date
   isActive: boolean
   subscriberTenant?: UserTenant
-  /** Approximate location (usually IP-based) when the viewer joined */
   location?: ViewerLocation | null
 }
 
@@ -40,162 +52,58 @@ export interface AnalyticsSummary {
   averageViewDuration: number
 }
 
-// Track subscriber activity
+function toAnalytics(o: any): StreamAnalytics {
+  return { ...o, timestamp: toDate(o.timestamp) }
+}
+
+function toViewer(o: any): StreamViewer {
+  return {
+    id: o.id,
+    streamSessionId: o.streamSessionId,
+    subscriberId: o.subscriberId,
+    subscriberName: o.subscriberName || "Unknown",
+    publisherId: o.publisherId,
+    publisherName: o.publisherName || "Unknown",
+    joinedAt: toDate(o.joinedAt),
+    lastSeen: toDate(o.lastSeen),
+    isActive: o.isActive !== false,
+    subscriberTenant: o.subscriberTenant as UserTenant | undefined,
+    location: o.location as ViewerLocation | null | undefined,
+  }
+}
+
 export const trackSubscriberActivity = async (data: {
   streamSessionId: string
   subscriberId: string
   subscriberName: string
   publisherId: string
   publisherName: string
-  action: 'join' | 'leave' | 'viewing'
+  action: "join" | "leave" | "viewing"
   duration?: number
   subscriberTenant?: UserTenant
-  /** Stored on activeViewers for live admin map/list; not written to streamAnalytics */
   location?: ViewerLocation | null
 }) => {
   try {
-    const { location, ...activityRest } = data
-    const analyticsData: Omit<StreamAnalytics, "id"> = {
-      ...activityRest,
-      timestamp: new Date(),
-    }
-
-    const docRef = await addDoc(collection(db, "streamAnalytics"), analyticsData)
-    
-    // Update active viewers collection
-    if (data.action === 'join') {
-      // Check if viewer already exists (active or inactive) for this stream
-      const activeViewersRef = collection(db, "activeViewers")
-      const q = query(
-        activeViewersRef,
-        where("streamSessionId", "==", data.streamSessionId),
-        where("subscriberId", "==", data.subscriberId)
-      )
-      const snapshot = await getDocs(q)
-
-      const loc = location ?? undefined
-      const tenantFields =
-        data.subscriberTenant !== undefined ? { subscriberTenant: data.subscriberTenant } : {}
-
-      if (snapshot.empty) {
-        // No existing document, create new one
-        await addDoc(collection(db, "activeViewers"), {
-          streamSessionId: data.streamSessionId,
-          subscriberId: data.subscriberId,
-          subscriberName: data.subscriberName,
-          publisherId: data.publisherId,
-          publisherName: data.publisherName,
-          joinedAt: new Date(),
-          lastSeen: new Date(),
-          isActive: true,
-          ...tenantFields,
-          ...(loc ? { location: loc } : {}),
-        })
-      } else {
-        // Existing document found, reactivate it
-        const viewerDoc = snapshot.docs[0]
-        await updateDoc(doc(db, "activeViewers", viewerDoc.id), {
-          isActive: true,
-          joinedAt: new Date(),
-          lastSeen: new Date(),
-          // Update name in case it changed
-          subscriberName: data.subscriberName,
-          publisherName: data.publisherName,
-          ...tenantFields,
-          ...(loc ? { location: loc } : {}),
-        })
-      }
-    } else if (data.action === 'leave') {
-      // Mark viewer as inactive
-      const activeViewersRef = collection(db, "activeViewers")
-      const q = query(
-        activeViewersRef,
-        where("streamSessionId", "==", data.streamSessionId),
-        where("subscriberId", "==", data.subscriberId),
-        where("isActive", "==", true) // Only update active viewers
-      )
-      const snapshot = await getDocs(q)
-      
-      for (const viewerDoc of snapshot.docs) {
-        await updateDoc(doc(db, "activeViewers", viewerDoc.id), {
-          isActive: false,
-          lastSeen: new Date(),
-        })
-      }
-    } else if (data.action === 'viewing') {
-      // Update lastSeen for active viewers
-      const activeViewersRef = collection(db, "activeViewers")
-      const q = query(
-        activeViewersRef,
-        where("streamSessionId", "==", data.streamSessionId),
-        where("subscriberId", "==", data.subscriberId),
-        where("isActive", "==", true)
-      )
-      const snapshot = await getDocs(q)
-      
-      for (const viewerDoc of snapshot.docs) {
-        await updateDoc(doc(db, "activeViewers", viewerDoc.id), {
-          lastSeen: new Date(),
-        })
-      }
-    }
-
-    return { success: true, id: docRef.id }
+    const res = await fetchWithAuth(ENDPOINT, { method: "POST", body: JSON.stringify(data) })
+    const json = await res.json().catch(() => ({}))
+    if (!res.ok) return { success: false, error: json.error || "Failed to track activity" }
+    return { success: true, id: json.id }
   } catch (error: any) {
     console.error("Error tracking analytics:", error)
     return { success: false, error: error.message }
   }
 }
 
-// Get admin analytics overview
 export const getAdminAnalytics = async (limitCount: number = 100) => {
   try {
-    const analyticsRef = collection(db, "streamAnalytics")
-    const q = query(analyticsRef, orderBy("timestamp", "desc"), limit(limitCount))
-    
-    const snapshot = await getDocs(q)
-    const analytics = snapshot.docs.map(doc => ({
-      id: doc.id,
-      ...doc.data()
-    })) as StreamAnalytics[]
-
-    // Get current active viewers
-    const activeViewersRef = collection(db, "activeViewers")
-    const activeSnapshot = await getDocs(query(activeViewersRef, where("isActive", "==", true)))
-    const activeViewers = activeSnapshot.docs.map(doc => ({
-      id: doc.id,
-      ...doc.data()
-    })) as StreamViewer[]
-
-    // Get stream sessions for context
-    const streamsRef = collection(db, "streamSessions")
-    const streamsSnapshot = await getDocs(query(streamsRef, where("isActive", "==", true)))
-    const activeStreams = streamsSnapshot.docs.map(doc => ({
-      id: doc.id,
-      ...doc.data()
-    }))
-
-    // Calculate summary statistics
-    const uniqueViewers = new Set(analytics.map(a => a.subscriberId)).size
-    const joinEvents = analytics.filter(a => a.action === 'join')
-    const leaveEvents = analytics.filter(a => a.action === 'leave')
-    const averageViewDuration = leaveEvents.length > 0 
-      ? leaveEvents.reduce((sum, event) => sum + (event.duration || 0), 0) / leaveEvents.length
-      : 0
-
-    const summary: AnalyticsSummary = {
-      totalAnalytics: analytics.length,
-      activeViewersCount: activeViewers.length,
-      activeStreamsCount: activeStreams.length,
-      uniqueViewers,
-      averageViewDuration: Math.round(averageViewDuration)
-    }
-
+    const res = await fetchWithAuth(`${ENDPOINT}?type=admin&limit=${limitCount}`, { method: "GET" })
+    if (!res.ok) throw new Error(`Request failed: ${res.status}`)
+    const json = await res.json()
     return {
-      analytics,
-      activeViewers,
-      activeStreams,
-      summary
+      analytics: (json.analytics || []).map(toAnalytics),
+      activeViewers: (json.activeViewers || []).map(toViewer),
+      activeStreams: json.activeStreams || [],
+      summary: json.summary as AnalyticsSummary | null,
     }
   } catch (error: any) {
     console.error("Error fetching admin analytics:", error)
@@ -203,56 +111,19 @@ export const getAdminAnalytics = async (limitCount: number = 100) => {
   }
 }
 
-// Get publisher analytics
 export const getPublisherAnalytics = async (publisherId: string, limitCount: number = 100) => {
   try {
-    const analyticsRef = collection(db, "streamAnalytics")
-    const q = query(
-      analyticsRef, 
-      where("publisherId", "==", publisherId),
-      orderBy("timestamp", "desc"),
-      limit(limitCount)
+    const res = await fetchWithAuth(
+      `${ENDPOINT}?type=publisher&publisherId=${encodeURIComponent(publisherId)}&limit=${limitCount}`,
+      { method: "GET" },
     )
-    
-    const snapshot = await getDocs(q)
-    const analytics = snapshot.docs.map(doc => ({
-      id: doc.id,
-      ...doc.data()
-    })) as StreamAnalytics[]
-
-    // Get current viewers for this publisher's active streams
-    const activeViewersRef = collection(db, "activeViewers")
-    const activeSnapshot = await getDocs(query(activeViewersRef, where("publisherId", "==", publisherId)))
-    const currentViewers = activeSnapshot.docs.map(doc => ({
-      id: doc.id,
-      ...doc.data()
-    })) as StreamViewer[]
-
-    // Get this publisher's stream sessions
-    const streamsRef = collection(db, "streamSessions")
-    const streamsSnapshot = await getDocs(query(streamsRef, where("publisherId", "==", publisherId)))
-    const streamSessions = streamsSnapshot.docs.map(doc => ({
-      id: doc.id,
-      ...doc.data()
-    }))
-
-    // Calculate publisher-specific statistics
-    const uniqueViewers = new Set(analytics.map(a => a.subscriberId)).size
-    const totalViews = analytics.filter(a => a.action === 'join').length
-    const activeViewersCount = currentViewers.filter(v => v.isActive).length
-
+    if (!res.ok) throw new Error(`Request failed: ${res.status}`)
+    const json = await res.json()
     return {
-      analytics,
-      currentViewers,
-      streamSessions,
-      summary: {
-        totalAnalytics: analytics.length,
-        currentViewersCount,
-        totalStreams: streamSessions.length,
-        activeStreams: streamSessions.filter((s: any) => s.isActive).length,
-        uniqueViewers,
-        totalViews
-      }
+      analytics: (json.analytics || []).map(toAnalytics),
+      currentViewers: (json.currentViewers || []).map(toViewer),
+      streamSessions: json.streamSessions || [],
+      summary: json.summary || null,
     }
   } catch (error: any) {
     console.error("Error fetching publisher analytics:", error)
@@ -260,90 +131,51 @@ export const getPublisherAnalytics = async (publisherId: string, limitCount: num
   }
 }
 
-// Get stream-specific analytics
 export const getStreamAnalytics = async (streamSessionId: string) => {
   try {
-    const analyticsRef = collection(db, "streamAnalytics")
-    const q = query(
-      analyticsRef,
-      where("streamSessionId", "==", streamSessionId),
-      orderBy("timestamp", "desc")
+    const res = await fetchWithAuth(
+      `${ENDPOINT}?type=stream&streamSessionId=${encodeURIComponent(streamSessionId)}`,
+      { method: "GET" },
     )
-    
-    const snapshot = await getDocs(q)
-    const analytics = snapshot.docs.map(doc => ({
-      id: doc.id,
-      ...doc.data()
-    })) as StreamAnalytics[]
-
-    return { analytics }
+    if (!res.ok) throw new Error(`Request failed: ${res.status}`)
+    const json = await res.json()
+    return { analytics: (json.analytics || []).map(toAnalytics) }
   } catch (error: any) {
     console.error("Error fetching stream analytics:", error)
     return { analytics: [] }
   }
 }
 
-// Real-time analytics subscription
+/**
+ * Live publisher analytics. Firestore realtime is replaced with short polling against
+ * the backend; the returned function stops polling (same Unsubscribe shape).
+ */
 export const subscribeToAnalytics = (
   publisherId: string,
-  callback: (data: { analytics: StreamAnalytics[], currentViewers: StreamViewer[] }) => void
+  callback: (data: { analytics: StreamAnalytics[]; currentViewers: StreamViewer[] }) => void,
 ) => {
-  const analyticsRef = collection(db, "streamAnalytics")
-  const activeViewersRef = collection(db, "activeViewers")
-
-  const analyticsQuery = query(
-    analyticsRef,
-    where("publisherId", "==", publisherId),
-    orderBy("timestamp", "desc"),
-    limit(50)
-  )
-
-  const viewersQuery = query(
-    activeViewersRef,
-    where("publisherId", "==", publisherId),
-    where("isActive", "==", true)
-  )
-
-  const unsubscribeAnalytics = onSnapshot(analyticsQuery, (snapshot) => {
-    const analytics = snapshot.docs.map(doc => ({
-      id: doc.id,
-      ...doc.data()
-    })) as StreamAnalytics[]
-
-    // Get current viewers
-    getDocs(viewersQuery).then((viewersSnapshot) => {
-      const currentViewers = viewersSnapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      })) as StreamViewer[]
-
-      callback({ analytics, currentViewers })
-    })
-  })
-
+  let active = true
+  const poll = async () => {
+    const { analytics, currentViewers } = await getPublisherAnalytics(publisherId, 50)
+    if (active) callback({ analytics, currentViewers })
+  }
+  void poll()
+  const interval = setInterval(poll, 10000)
   return () => {
-    unsubscribeAnalytics()
+    active = false
+    clearInterval(interval)
   }
 }
 
-// Cleanup old analytics data (can be called periodically)
 export const cleanupOldAnalytics = async (daysToKeep: number = 30) => {
   try {
-    const cutoffDate = new Date()
-    cutoffDate.setDate(cutoffDate.getDate() - daysToKeep)
-
-    const analyticsRef = collection(db, "streamAnalytics")
-    const q = query(analyticsRef, where("timestamp", "<", cutoffDate))
-    
-    const snapshot = await getDocs(q)
-    const batch = []
-    
-    for (const doc of snapshot.docs) {
-      batch.push(doc.ref.delete())
-    }
-
-    await Promise.all(batch)
-    return { success: true, deletedCount: batch.length }
+    const res = await fetchWithAuth(ENDPOINT, {
+      method: "POST",
+      body: JSON.stringify({ action: "cleanup", daysToKeep }),
+    })
+    const json = await res.json().catch(() => ({}))
+    if (!res.ok) return { success: false, error: json.error || "Cleanup failed" }
+    return { success: true, deletedCount: json.deletedCount }
   } catch (error: any) {
     console.error("Error cleaning up analytics:", error)
     return { success: false, error: error.message }

@@ -1,35 +1,18 @@
 import { NextRequest, NextResponse } from "next/server"
 import { getAdminDb } from "@/lib/firebase-admin"
-import { isBlockedApiCaller } from "@/lib/server/api-origin"
+import { isBlockedApiCaller, isOwnHost } from "@/lib/server/api-origin"
 
 // 1x1 transparent GIF for the <img>-based fallback tracker.
 const PIXEL = Buffer.from("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7", "base64")
-
-function parseOwnHosts(): string[] {
-  const extra = (process.env.OWN_APP_HOSTS || "")
-    .split(",")
-    .map((s) => s.trim().toLowerCase())
-    .filter(Boolean)
-  return Array.from(
-    new Set([
-      ...extra,
-      "localhost",
-      "127.0.0.1",
-      "sportsmagicianaudio.vercel.app",
-      "spa-gules-ten.vercel.app",
-    ]),
-  )
-}
 
 function clientIp(req: NextRequest): string {
   const xff = req.headers.get("x-forwarded-for") || ""
   return xff.split(",")[0].trim() || req.headers.get("x-real-ip") || "unknown"
 }
 
-async function record(req: NextRequest, payload: Record<string, unknown>) {
+async function record(req: NextRequest, payload: Record<string, any>) {
   const host = String(payload.host || "").toLowerCase()
-  const ownHosts = parseOwnHosts()
-  const isOwn = ownHosts.some((h) => host === h || host.endsWith(`.${h}`) || host.includes(h))
+  const isOwn = isOwnHost(host)
 
   const entry = {
     ip: clientIp(req),
@@ -41,16 +24,17 @@ async function record(req: NextRequest, payload: Record<string, unknown>) {
     country: req.headers.get("x-vercel-ip-country") || null,
     city: req.headers.get("x-vercel-ip-city") || null,
     region: req.headers.get("x-vercel-ip-country-region") || null,
-    suspicious: !isOwn,
+    suspicious: !isOwn, // true when served from a domain that isn't yours
     createdAt: new Date(),
   }
 
+  // Always log to the server console (visible in Vercel logs), even if Firestore is unavailable.
   console.log(`[track] ${entry.suspicious ? "FOREIGN" : "own"} host=${entry.host} ip=${entry.ip} ua=${entry.userAgent}`)
 
   try {
     const db = await getAdminDb()
     await db.collection("accessLogs").add(entry)
-  } catch {
+  } catch (e) {
     // Firestore/admin not configured — console log above still captured it.
   }
 }
@@ -72,6 +56,8 @@ export async function GET(req: NextRequest) {
   if (isBlockedApiCaller(req)) {
     return new NextResponse(null, { status: 403 })
   }
+  // Image-pixel fallback: <img src="https://YOURDOMAIN/api/track?host=..."> works even if a
+  // clone strips your JavaScript. The `host` query is whatever the embedding page passes.
   const url = new URL(req.url)
   await record(req, {
     host: url.searchParams.get("host") || req.headers.get("referer") || "",

@@ -1,34 +1,54 @@
-/** Domains that must never call our API (clone / retransmit sites). */
-export const BLOCKED_API_HOSTS = ["intelsnipers.com", "www.intelsnipers.com"]
+/**
+ * Origin / clone-site filtering for the API.
+ *
+ * All host lists are configurable via env (comma-separated) so new domains can be added
+ * without code changes. The defaults preserve the previous hardcoded behavior.
+ */
 
-function parseExtraOrigins(raw: string | undefined): string[] {
-  if (!raw?.trim()) return []
+function fromEnv(name: string, fallback: string[]): string[] {
+  const raw = process.env[name]
+  if (!raw) return fallback
   return raw
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean)
 }
 
-/** Browser origins allowed to call /api/* on our backend. */
-export const ALLOWED_API_ORIGINS = Array.from(
-  new Set([
-    ...parseExtraOrigins(process.env.ALLOWED_API_ORIGINS),
-    ...(process.env.NEXT_PUBLIC_BASE_URL ? [process.env.NEXT_PUBLIC_BASE_URL] : []),
-    // Main SPA deployments (shared Firebase backend)
-    "https://sportsmagicianaudio.vercel.app",
-    "https://spa-gules-ten.vercel.app",
-    // Kevionics shadow — local dev and production
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "http://localhost:3001",
-    "http://127.0.0.1:3001",
-  ]),
-)
+/** Domains that must never call our API (clone / retransmit sites). */
+export const BLOCKED_API_HOSTS = fromEnv("BLOCKED_API_HOSTS", [
+  "intelsnipers.com",
+  "www.intelsnipers.com",
+])
+
+/**
+ * Browser origins allowed to call /api/* on our backend. Locked to the two production
+ * frontends only. For local development, set ALLOWED_API_ORIGINS in the environment
+ * (e.g. "http://localhost:3000") so you don't have to touch this list.
+ */
+export const ALLOWED_API_ORIGINS = fromEnv("ALLOWED_API_ORIGINS", [
+  "https://sportsmagicianaudio.vercel.app",
+  "https://kevionics-audio-three.vercel.app",
+  "https://spa-gules-ten.vercel.app",
+])
+
+/** Hostnames that are legitimately OUR deployment (anything else = a clone). */
+export const OWN_HOSTS = fromEnv("OWN_HOSTS", [
+  "sportsmagicianaudio.vercel.app",
+  "kevionics-audio-three.vercel.app",
+  "spa-gules-ten.vercel.app",
+])
 
 function headerContainsBlockedHost(value: string | null): boolean {
   if (!value) return false
   const lower = value.toLowerCase()
   return BLOCKED_API_HOSTS.some((host) => lower.includes(host))
+}
+
+/** True when the given host is one of our own deployments. */
+export function isOwnHost(host: string | null | undefined): boolean {
+  const h = String(host || "").toLowerCase()
+  if (!h) return false
+  return OWN_HOSTS.some((own) => h === own || h.endsWith(`.${own}`) || h.includes(own))
 }
 
 /** True when Origin/Referer match a known clone domain. */

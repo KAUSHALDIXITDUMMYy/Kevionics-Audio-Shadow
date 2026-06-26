@@ -15,7 +15,7 @@ import { Switch } from "@/components/ui/switch"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from "@/components/ui/alert-dialog"
-import { createUser, getAllUsers, updateUserStatus, updateUserChatPermission, resetUserPassword } from "@/lib/admin"
+import { createUser, getAllUsersPage, updateUserStatus, updateUserChatPermission, resetUserPassword, deleteUserAccount } from "@/lib/admin"
 import type { UserProfile, UserRole } from "@/lib/auth"
 import {
   Plus,
@@ -33,14 +33,18 @@ import {
   ListTree,
   RefreshCw,
   Loader2,
+  ShieldCheck,
+  Trash2,
 } from "lucide-react"
+import { disableMfa } from "@/lib/mfa-client"
 import { Textarea } from "@/components/ui/textarea"
+import { GeneratePasswordButton } from "@/components/admin/generate-password-button"
 import { toast } from "@/hooks/use-toast"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { useAuth } from "@/hooks/use-auth"
+import { useInfiniteScroll } from "@/hooks/use-infinite-scroll"
 import { isShadowAdmin, KEVIONICS_EMAIL_DOMAIN, resolveUserTenant } from "@/lib/tenant"
-import { PRODUCT_DISPLAY_NAME } from "@/lib/branding"
 
 // Utility function to convert Firestore Timestamp to Date
 const convertTimestampToDate = (timestamp: any): Date | null => {
@@ -77,8 +81,8 @@ const convertTimestampToDate = (timestamp: any): Date | null => {
 // Utility function to sort users alphabetically
 const sortUsersAlphabetically = (users: (UserProfile & { id: string })[]) => {
   return [...users].sort((a, b) => {
-    const nameA = (a.displayName || a.email).toLowerCase()
-    const nameB = (b.displayName || b.email).toLowerCase()
+    const nameA = (a.displayName || a.email || "").toLowerCase()
+    const nameB = (b.displayName || b.email || "").toLowerCase()
     return nameA.localeCompare(nameB)
   })
 }
@@ -98,8 +102,27 @@ const normalizeDomain = (d: string) => d.trim().toLowerCase().replace(/^@/, "")
 export function UserManagement() {
   const { user, userProfile, loading: authLoading } = useAuth()
   const isKevShadow = Boolean(userProfile && isShadowAdmin(userProfile))
-  const [users, setUsers] = useState<(UserProfile & { id: string })[]>([])
-  const [loading, setLoading] = useState(true)
+  const {
+    items: users,
+    setItems: setUsers,
+    loading,
+    loadingMore,
+    hasMore,
+    reset: reloadUsers,
+    sentinelRef,
+  } = useInfiniteScroll<UserProfile & { id: string }>({
+    fetchPage: getAllUsersPage,
+    enabled: Boolean(userProfile?.role === "admin"),
+    resetKey: `${userProfile?.uid ?? ""}:${userProfile?.tenant ?? ""}`,
+    merge: (prev, next) => {
+      const seen = new Set(prev.map((u) => u.id))
+      const merged = [...prev]
+      for (const row of next) {
+        if (!seen.has(row.id)) merged.push(row)
+      }
+      return merged
+    },
+  })
   const [showCreateForm, setShowCreateForm] = useState(false)
   const [createLoading, setCreateLoading] = useState(false)
   const [error, setError] = useState("")
@@ -135,10 +158,9 @@ export function UserManagement() {
 
   useEffect(() => {
     if (!userProfile || userProfile.role !== "admin") return
-    void loadUsers(false)
-    const intervalId = setInterval(() => void loadUsers(true), 60_000)
+    const intervalId = setInterval(() => void reloadUsers(), 60_000)
     return () => clearInterval(intervalId)
-  }, [userProfile?.uid, userProfile?.tenant, userProfile?.email])
+  }, [userProfile?.uid, userProfile?.tenant, userProfile?.email, reloadUsers])
 
   useEffect(() => {
     if (isKevShadow) {
@@ -148,22 +170,10 @@ export function UserManagement() {
     }
   }, [isKevShadow])
 
-  /** @param silent When true, refresh list without full-page loading spinner (reduces Firestore reads vs. realtime snapshot on entire collection). */
-  const loadUsers = async (silent = false) => {
-    if (!userProfile || userProfile.role !== "admin") return
-    if (!silent) setLoading(true)
-    try {
-      const usersData = await getAllUsers(userProfile)
-      setUsers(usersData as (UserProfile & { id: string })[])
-    } finally {
-      if (!silent) setLoading(false)
-    }
-  }
-
   const handleRefreshUserList = async () => {
     setListRefreshing(true)
     try {
-      await loadUsers(true)
+      await reloadUsers()
     } finally {
       setListRefreshing(false)
     }
@@ -204,7 +214,7 @@ export function UserManagement() {
       setDisplayName("")
       setRole("subscriber")
       setShowCreateForm(false)
-      loadUsers()
+      void reloadUsers()
     }
 
     setCreateLoading(false)
@@ -313,7 +323,7 @@ export function UserManagement() {
   const handleToggleChat = async (userId: string, currentValue: boolean) => {
     const result = await updateUserChatPermission(userId, !currentValue)
     if (result.success) {
-      void loadUsers(true)
+      void reloadUsers()
       const u = users.find((x) => x.id === userId)
       toast({
         title: "Chat Updated",
@@ -331,7 +341,7 @@ export function UserManagement() {
   const handleToggleUserStatus = async (userId: string, currentStatus: boolean) => {
     const result = await updateUserStatus(userId, !currentStatus)
     if (result.success) {
-      void loadUsers(true)
+      void reloadUsers()
       const user = users.find(u => u.id === userId)
       toast({
         title: "Status Updated",
@@ -415,6 +425,21 @@ export function UserManagement() {
     setConfirmPassword("")
   }
 
+  const handleDeleteUser = async (userId: string, userEmail: string) => {
+    if (!user?.uid) {
+      toast({ title: "Not signed in", description: "Please sign in again.", variant: "destructive" })
+      return
+    }
+    const result = await deleteUserAccount(userId, user.uid)
+    if (result.success) {
+      toast({ title: "User deleted", description: result.message || `${userEmail} has been removed.` })
+      setUsers((prev) => prev.filter((u) => u.id !== userId))
+      void reloadUsers()
+    } else {
+      toast({ title: "Could not delete user", description: result.error, variant: "destructive" })
+    }
+  }
+
   const getRoleBadgeVariant = (role: UserRole) => {
     switch (role) {
       case "admin":
@@ -443,9 +468,9 @@ export function UserManagement() {
     const q = searchQuery.trim().toLowerCase()
     return sorted.filter(
       (u) =>
-        u.email.toLowerCase().includes(q) ||
+        (u.email || "").toLowerCase().includes(q) ||
         (u.displayName || "").toLowerCase().includes(q) ||
-        u.role.toLowerCase().includes(q)
+        (u.role || "").toLowerCase().includes(q),
     )
   }, [users, searchQuery])
 
@@ -552,7 +577,7 @@ export function UserManagement() {
               <CardDescription>
                 {isKevShadow
                   ? `Create and manage Kevionics shadow subscribers (@${KEVIONICS_EMAIL_DOMAIN}). Publishers and live streams stay shared with the main deployment.`
-                  : `Create and manage user accounts for ${PRODUCT_DISPLAY_NAME}`}
+                  : "Create and manage user accounts for Sportsmagician Audio"}
               </CardDescription>
             </div>
             <div className="flex w-full flex-col gap-2 sm:w-auto sm:min-w-0 sm:flex-row sm:shrink-0">
@@ -632,10 +657,13 @@ export function UserManagement() {
                     </div>
 
                     <div className="space-y-2">
-                      <Label htmlFor="password">Password</Label>
+                      <div className="flex items-center justify-between">
+                        <Label htmlFor="password">Password</Label>
+                        <GeneratePasswordButton onGenerate={setPassword} disabled={createLoading} />
+                      </div>
                       <Input
                         id="password"
-                        type="password"
+                        type="text"
                         value={password}
                         onChange={(e) => setPassword(e.target.value)}
                         required
@@ -717,10 +745,13 @@ export function UserManagement() {
                       />
                     </div>
                     <div className="space-y-2">
-                      <Label htmlFor="bulk-password">Password (all new users)</Label>
+                      <div className="flex items-center justify-between">
+                        <Label htmlFor="bulk-password">Password (all new users)</Label>
+                        <GeneratePasswordButton onGenerate={setBulkPassword} disabled={bulkLoading} />
+                      </div>
                       <Input
                         id="bulk-password"
-                        type="password"
+                        type="text"
                         value={bulkPassword}
                         onChange={(e) => setBulkPassword(e.target.value)}
                         required
@@ -809,6 +840,7 @@ export function UserManagement() {
                 onToggleChat={handleToggleChat}
                 getRoleBadgeVariant={getRoleBadgeVariant}
                 onResetPassword={openResetPasswordDialog}
+                onDelete={handleDeleteUser}
               />
             )
           ) : (
@@ -861,6 +893,9 @@ export function UserManagement() {
                   onToggleChat={handleToggleChat}
                   getRoleBadgeVariant={getRoleBadgeVariant}
                   onResetPassword={openResetPasswordDialog}
+                  onDelete={handleDeleteUser}
+                  sentinelRef={hasMore ? sentinelRef : undefined}
+                  loadingMore={loadingMore}
                 />
               )}
             </TabsContent>
@@ -875,6 +910,7 @@ export function UserManagement() {
                   onToggleChat={handleToggleChat}
                   getRoleBadgeVariant={getRoleBadgeVariant}
                   onResetPassword={openResetPasswordDialog}
+                  onDelete={handleDeleteUser}
                 />
               )}
             </TabsContent>
@@ -889,6 +925,7 @@ export function UserManagement() {
                   onToggleChat={handleToggleChat}
                   getRoleBadgeVariant={getRoleBadgeVariant}
                   onResetPassword={openResetPasswordDialog}
+                  onDelete={handleDeleteUser}
                 />
               )}
             </TabsContent>
@@ -903,6 +940,7 @@ export function UserManagement() {
                   onToggleChat={handleToggleChat}
                   getRoleBadgeVariant={getRoleBadgeVariant}
                   onResetPassword={openResetPasswordDialog}
+                  onDelete={handleDeleteUser}
                 />
               )}
             </TabsContent>
@@ -922,10 +960,19 @@ export function UserManagement() {
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="space-y-2">
-              <Label htmlFor="newPassword">New Password</Label>
+              <div className="flex items-center justify-between">
+                <Label htmlFor="newPassword">New Password</Label>
+                <GeneratePasswordButton
+                  onGenerate={(pwd) => {
+                    setNewPassword(pwd)
+                    setConfirmPassword(pwd)
+                  }}
+                  disabled={resetPasswordLoading}
+                />
+              </div>
               <Input
                 id="newPassword"
-                type="password"
+                type="text"
                 value={newPassword}
                 onChange={(e) => setNewPassword(e.target.value)}
                 placeholder="Enter new password"
@@ -973,12 +1020,18 @@ function UserTable({
   onToggleChat,
   getRoleBadgeVariant,
   onResetPassword,
+  onDelete,
+  sentinelRef,
+  loadingMore,
 }: {
   users: (UserProfile & { id: string })[]
   onToggleStatus: (userId: string, currentStatus: boolean) => void
   onToggleChat: (userId: string, currentValue: boolean) => void
   getRoleBadgeVariant: (role: UserRole) => any
   onResetPassword: (userId: string, userEmail: string) => void
+  onDelete: (userId: string, userEmail: string) => void | Promise<void>
+  sentinelRef?: React.RefObject<HTMLDivElement | null>
+  loadingMore?: boolean
 }) {
   return (
     <div className="overflow-x-auto -mx-4 sm:mx-0">
@@ -1010,6 +1063,12 @@ function UserTable({
                     {(user as any).isPending && (
                       <Badge variant="outline" className="text-xs bg-yellow-50 text-yellow-700 border-yellow-300 whitespace-nowrap">
                         Pending
+                      </Badge>
+                    )}
+                    {user.totpEnabled && (
+                      <Badge variant="outline" className="text-xs bg-green-50 text-green-700 border-green-300 whitespace-nowrap inline-flex items-center gap-1">
+                        <ShieldCheck className="h-3 w-3" />
+                        2FA
                       </Badge>
                     )}
                   </div>
@@ -1081,23 +1140,123 @@ function UserTable({
                   )}
                 </TableCell>
                 <TableCell>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => onResetPassword(user.id, user.email)}
-                    className="h-8 text-xs"
-                  >
-                    <KeyRound className="h-3 w-3 mr-1" />
-                    <span className="hidden sm:inline">Reset Password</span>
-                    <span className="sm:hidden">Reset</span>
-                  </Button>
+                  <div className="flex flex-col sm:flex-row gap-1">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => onResetPassword(user.id, user.email)}
+                      className="h-8 text-xs"
+                    >
+                      <KeyRound className="h-3 w-3 mr-1" />
+                      <span className="hidden sm:inline">Reset Password</span>
+                      <span className="sm:hidden">Reset</span>
+                    </Button>
+                    {user.totpEnabled && <Reset2faButton userId={user.id} />}
+                    <DeleteUserButton userId={user.id} userEmail={user.email} onDelete={onDelete} />
+                  </div>
                 </TableCell>
               </TableRow>
             ))}
+            {(sentinelRef || loadingMore) && (
+              <TableRow>
+                <TableCell colSpan={8} className="text-center text-sm text-muted-foreground py-4">
+                  <div ref={sentinelRef}>
+                    {loadingMore ? (
+                      <span className="inline-flex items-center gap-2">
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        Loading more users…
+                      </span>
+                    ) : (
+                      "Scroll for more users"
+                    )}
+                  </div>
+                </TableCell>
+              </TableRow>
+            )}
           </TableBody>
         </Table>
       </div>
     </div>
+  )
+}
+
+function DeleteUserButton({
+  userId,
+  userEmail,
+  onDelete,
+}: {
+  userId: string
+  userEmail: string
+  onDelete: (userId: string, userEmail: string) => void | Promise<void>
+}) {
+  const [loading, setLoading] = useState(false)
+
+  const handleConfirm = async () => {
+    setLoading(true)
+    try {
+      await onDelete(userId, userEmail)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <AlertDialog>
+      <AlertDialogTrigger asChild>
+        <Button variant="outline" size="sm" className="h-8 text-xs text-destructive hover:text-destructive" disabled={loading}>
+          {loading ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : <Trash2 className="h-3 w-3 mr-1" />}
+          <span className="hidden sm:inline">Delete</span>
+        </Button>
+      </AlertDialogTrigger>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Delete this user?</AlertDialogTitle>
+          <AlertDialogDescription>
+            This permanently deletes <span className="font-medium">{userEmail}</span>, including their sign-in account
+            and assignments. This cannot be undone.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={loading}>Cancel</AlertDialogCancel>
+          <AlertDialogAction
+            onClick={(e) => {
+              e.preventDefault()
+              void handleConfirm()
+            }}
+            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            disabled={loading}
+          >
+            {loading ? "Deleting..." : "Delete"}
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  )
+}
+
+function Reset2faButton({ userId }: { userId: string }) {
+  const [loading, setLoading] = useState(false)
+  const [done, setDone] = useState(false)
+
+  const handleReset = async () => {
+    setLoading(true)
+    try {
+      await disableMfa(userId)
+      setDone(true)
+      toast({ title: "2FA reset", description: "The player can set up two-factor again on next login." })
+    } catch (e: any) {
+      toast({ title: "Could not reset 2FA", description: e.message, variant: "destructive" })
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <Button variant="outline" size="sm" onClick={handleReset} disabled={loading || done} className="h-8 text-xs">
+      {loading ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : <ShieldCheck className="h-3 w-3 mr-1" />}
+      <span className="hidden sm:inline">{done ? "2FA reset" : "Reset 2FA"}</span>
+      <span className="sm:hidden">2FA</span>
+    </Button>
   )
 }
 
